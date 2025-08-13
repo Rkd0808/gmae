@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Jumping Ball Runner</title>
+<style>
+  :root{--bg:#a0e9ff;--ground:#65c56b;--card:#fff9;--accent:#ff6b6b}
+  html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Arial}
+  body{background:linear-gradient(180deg,var(--bg),#8ad7ff);display:flex;align-items:center;justify-content:center}
+  .wrap{width:960px;max-width:96vw;height:540px;max-height:80vh;background:linear-gradient(180deg,rgba(255,255,255,0.6),rgba(255,255,255,0.12));border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,0.18);overflow:hidden;position:relative}
+  canvas{display:block;width:100%;height:100%;background:transparent}
+  .hud{position:absolute;left:12px;top:12px;display:flex;gap:8px;align-items:center}
+  .stat{background:var(--card);backdrop-filter:blur(6px);padding:8px 12px;border-radius:12px;font-weight:700;color:#032;box-shadow:0 3px 10px rgba(0,0,0,0.08)}
+  .controls{position:absolute;right:12px;top:12px;display:flex;gap:8px;align-items:center}
+  .btn{background:linear-gradient(180deg,#fff,#fff0);padding:8px 12px;border-radius:12px;border:2px solid rgba(0,0,0,0.06);cursor:pointer;font-weight:700}
+  .big-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;pointer-events:none}
+  .overlay-card{pointer-events:auto;background:linear-gradient(180deg,#ffffffcc,#ffffff88);padding:18px 22px;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,0.18);text-align:center}
+  .title{font-size:24px;font-weight:900;color:#1a3}
+  .sub{font-size:14px;color:#334;opacity:0.9;margin-top:6px}
+  .retry{margin-top:12px;background:linear-gradient(90deg,var(--accent),#ffb86b);border:none;padding:10px 16px;border-radius:12px;font-weight:900;color:white;cursor:pointer}
+  .hint{font-size:12px;color:#333a;margin-top:8px}
+  footer{position:absolute;left:12px;bottom:12px;font-size:12px;color:#033;opacity:0.75}
+</style>
+</head>
+<body>
+<div class="wrap" role="application" aria-label="Jumping Ball Runner game container">
+  <canvas id="gameCanvas" width="1280" height="720"></canvas>
+  <div class="hud">
+    <div class="stat">Score: <span id="score">0</span></div>
+    <div class="stat">High: <span id="high">0</span></div>
+  </div>
+  <div class="controls">
+    <div class="btn" id="soundToggle">🔊</div>
+    <div class="btn" id="pauseBtn">⏸️</div>
+  </div>
+  <div class="big-overlay" id="overlay">
+    <div class="overlay-card" id="startCard">
+      <div class="title">Jumping Ball Runner</div>
+      <div class="sub">Jump over obstacles — survive as long as you can!<br>Press <strong>Space</strong> or <strong>Tap</strong> to jump.</div>
+      <button class="retry" id="startBtn">Start Game</button>
+      <div class="hint">Cartoonish ball + colorful parallax background + silly sounds = pure joy</div>
+    </div>
+    <div class="overlay-card" id="gameOverCard" style="display:none">
+      <div class="title">You Crashed!</div>
+      <div class="sub">Score: <span id="finalScore">0</span></div>
+      <button class="retry" id="retryBtn">Retry</button>
+    </div>
+  </div>
+  <footer>Tip: Hold space for a slightly higher jump. Mobile: tap and hold.</footer>
+</div>
+<script>
+(() => {
+  // Canvas setup
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  // Logical resolution for crispness
+  const W = 1280, H = 720;
+  canvas.width = W; canvas.height = H;
+
+  // DOM
+  const scoreEl = document.getElementById('score');
+  const highEl = document.getElementById('high');
+  const overlay = document.getElementById('overlay');
+  const startCard = document.getElementById('startCard');
+  const gameOverCard = document.getElementById('gameOverCard');
+  const startBtn = document.getElementById('startBtn');
+  const retryBtn = document.getElementById('retryBtn');
+  const finalScore = document.getElementById('finalScore');
+  const soundToggle = document.getElementById('soundToggle');
+  const pauseBtn = document.getElementById('pauseBtn');
+
+  // Audio: simple funny sounds via WebAudio
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  let audioCtx = null;
+  let soundEnabled = true;
+  soundToggle.onclick = () => { soundEnabled = !soundEnabled; soundToggle.textContent = soundEnabled ? '🔊' : '🔈'; if(soundEnabled && !audioCtx) audioCtx = new AudioCtx(); }
+
+  function beep(freq=440, duration=0.08, type='sine', vol=0.12){
+    if(!soundEnabled) return;
+    if(!audioCtx) audioCtx = new AudioCtx();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g); g.connect(audioCtx.destination);
+    const now = audioCtx.currentTime;
+    g.gain.setValueAtTime(vol, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + duration);
+    o.start(now); o.stop(now + duration + 0.02);
+  }
+  function funnyJump(){ beep(520,0.09,'sawtooth',0.14); beep(660,0.06,'sine',0.08); }
+  function funnyHit(){ beep(120,0.18,'square',0.16); }
+  function milestone(){ beep(900,0.12,'triangle',0.12); beep(650,0.08,'sine',0.1); }
+
+  // Game state
+  let running=false, paused=false, gameOver=false;
+  let score=0, high=Number(localStorage.getItem('jj_high')||0);
+  highEl.textContent = high;
+  let speedBase = 6; // base ground speed
+  let speed = speedBase; // will increase
+  let distance=0;
+
+  // Player
+  const player = {
+    x: 160, y: H-150, r:44, vy:0, onGround:true, jumpPower:16, gravity:0.9, isHolding:false, blinkTimer:0
+  };
+
+  // Obstacles
+  let obstacles = [];
+  let spawnTimer=0, spawnRate=120; // frames
+
+  // Parallax layers
+  const layers = [
+    {speed:0.3, color:'#7ed0ff', render:drawFarClouds},
+    {speed:0.7, color:'#b6f2c1', render:drawHills},
+    {speed:1.2, color:'#65c56b', render:drawForeground}
+  ];
+  let layerOffsets = [0,0,0];
+
+  // Particles
+  const particles=[];
+
+  // Controls
+  let inputDown=false;
+  window.addEventListener('keydown', e=>{
+    if(e.code==='Space'){ e.preventDefault(); inputDown=true; if(!running) startGame(); }
+    if(e.code==='KeyP'){ paused = !paused; pauseBtn.textContent = paused ? '▶️' : '⏸️'; }
+  });
+  window.addEventListener('keyup', e=>{ if(e.code==='Space') inputDown=false; });
+  // Mobile/touch
+  canvas.addEventListener('pointerdown', e=>{ inputDown=true; if(!running) startGame(); });
+  window.addEventListener('pointerup', ()=>inputDown=false);
+
+  // Start / Retry
+  startBtn.onclick = startGame;
+  retryBtn.onclick = ()=>{ resetGame(); startGame(); };
+
+  function startGame(){
+    overlay.style.display='none';
+    running=true; gameOver=false; paused=false;
+    score=0; distance=0; speed = speedBase; obstacles=[]; spawnTimer=0; player.y=H-150; player.vy=0; player.onGround=true;
+  }
+  function endGame(){
+    running=false; gameOver=true; overlay.style.display='flex'; startCard.style.display='none'; gameOverCard.style.display='block'; finalScore.textContent = Math.floor(score);
+    if(score>high){ high = Math.floor(score); localStorage.setItem('jj_high', high); highEl.textContent = high; }
+    funnyHit();
+  }
+  function resetGame(){ overlay.style.display='flex'; startCard.style.display='none'; gameOverCard.style.display='none'; }
+
+  // Helpers
+  function rand(min,max){ return Math.random()*(max-min)+min }
+
+  // Game loop
+  let frame=0;
+  function loop(){
+    if(!paused){ update(); }
+    render();
+    frame++;
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  function update(){
+    if(!running) return;
+    // speedup by score/time
+    speed = speedBase + (score/200);
+    distance += speed/60;
+    score += 0.2 + speed/200;
+    scoreEl.textContent = Math.floor(score);
+
+    // parallax offsets
+    for(let i=0;i<layerOffsets.length;i++) layerOffsets[i] = (layerOffsets[i] - speed*layers[i].speed)%W;
+
+    // spawn obstacles
+    spawnTimer--;
+    if(spawnTimer<=0){
+      spawnTimer = Math.floor(spawnRate - Math.min(80, score/3));
+      // random obstacle size
+      const h = Math.floor(rand(46,140));
+      const w = Math.floor(rand(40,84));
+      obstacles.push({x:W + rand(0,160), y:H-120-h, w, h, passed:false});
+    }
+
+    // update obstacles
+    for(let ob of obstacles){ ob.x -= speed; }
+    // remove offscreen
+    while(obstacles.length && obstacles[0].x + obstacles[0].w < -50) obstacles.shift();
+
+    // player physics
+    if(inputDown){
+      // press to jump / hold for higher jump
+      if(player.onGround){ player.vy = -player.jumpPower; player.onGround=false; funnyJump(); }
+      else if(player.vy < -3){ player.vy -= 0.4; } // allow higher
+    }
+    player.vy += player.gravity;
+    player.y += player.vy;
+    const groundY = H-120 - player.r;
+    if(player.y >= groundY){ player.y = groundY; player.vy = 0; player.onGround = true; }
+
+    // blinking
+    player.blinkTimer = Math.max(0, player.blinkTimer-1);
+    if(player.blinkTimer===0 && Math.random() < 0.01) player.blinkTimer = 12;
+
+    // collisions
+    for(let ob of obstacles){
+      if(!ob.passed && ob.x + ob.w < player.x - player.r) { ob.passed=true; }
+      if(collidesCircleRect(player.x, player.y, player.r-6, ob.x, ob.y, ob.w, ob.h)){
+        endGame();
+      }
+    }
+
+    // milestone ding
+    if(Math.floor(score) > 0 && Math.floor(score) % 50 === 0 && Math.floor(score) !== 0 && frame % 60 === 0){ milestone(); }
+
+    // particles update
+    for(let p of particles){ p.x += p.vx; p.y += p.vy; p.vy += 0.4; p.life--; }
+    while(particles.length && particles[0].life <= 0) particles.shift();
+  }
+
+  // collision helper
+  function collidesCircleRect(cx, cy, cr, rx, ry, rw, rh){
+    // closest point
+    const closestX = Math.max(rx, Math.min(cx, rx+rw));
+    const closestY = Math.max(ry, Math.min(cy, ry+rh));
+    const dx = cx - closestX; const dy = cy - closestY;
+    return (dx*dx + dy*dy) < (cr*cr);
+  }
+
+  // Rendering
+  function render(){
+    // clear
+    ctx.clearRect(0,0,W,H);
+
+    // sky gradient
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#a4ecff'); g.addColorStop(1,'#6fd8ff');
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+    // draw parallax layers
+    for(let i=0;i<layers.length;i++){
+      ctx.save(); ctx.translate(layerOffsets[i],0);
+      layers[i].render(ctx, W, H);
+      ctx.translate(W,0);
+      layers[i].render(ctx, W, H);
+      ctx.restore();
+    }
+
+    // ground
+    ctx.fillStyle = '#4db05a'; ctx.fillRect(0,H-120,W,120);
+    drawDecorativeGround(ctx);
+
+    // obstacles
+    for(let ob of obstacles) drawObstacle(ctx, ob);
+
+    // player
+    drawPlayer(ctx, player);
+
+    // particles
+    for(let p of particles) drawParticle(ctx, p);
+
+    // if not started show hint
+    if(!running && !gameOver){
+      // keep start card visible
+      overlay.style.display='flex'; startCard.style.display='block'; gameOverCard.style.display='none';
+    }
+  }
+
+  // Parallax drawing functions
+  function drawFarClouds(ctx, W, H){
+    // big soft circles
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    for(let i=0;i<6;i++){
+      const x = (i*260)%W - 40; const y = 90 + (i%3)*40;
+      ctx.beginPath(); ctx.ellipse(x, y, 80,48,0,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x+60,y+10,60,36,0,0,Math.PI*2); ctx.fill();
+    }
+  }
+  function drawHills(ctx, W, H){
+    // rolling hills
+    ctx.fillStyle = '#9ff4b5'; ctx.beginPath(); ctx.moveTo(0,H-160);
+    for(let x=0;x<=W+200;x+=80){ ctx.quadraticCurveTo(x-40, H-200 - 60*Math.sin(x/120), x, H-160); }
+    ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.closePath(); ctx.fill();
+  }
+  function drawForeground(ctx, W, H){
+    // simple repeating decorative tufts
+    for(let x=0;x<=W;x+=120){
+      const xx = x - 20; ctx.beginPath(); ctx.moveTo(xx, H-120); ctx.quadraticCurveTo(xx+15,H-160,xx+40,H-120);
+      ctx.quadraticCurveTo(xx+20,H-140,xx+60,H-120); ctx.fillStyle='#3fb34b'; ctx.fill();
+    }
+  }
+  function drawDecorativeGround(ctx){
+    // stripes for cartoony look
+    ctx.fillStyle='rgba(255,255,255,0.06)';
+    for(let i=0;i<20;i++) ctx.fillRect((i*67 + (frame*2%67))%W, H-60, 30, 6);
+  }
+
+  function drawObstacle(ctx, ob){
+    // cartoon cactus/tree style
+    ctx.save(); ctx.translate(ob.x, ob.y);
+    // stem
+    ctx.fillStyle='#2f8a3c'; ctx.beginPath(); ctx.moveTo(0,ob.h); ctx.lineTo(ob.w,ob.h); ctx.lineTo(ob.w-12,0); ctx.lineTo(12,0); ctx.closePath(); ctx.fill();
+    // spots
+    ctx.fillStyle='#3fb34b'; for(let i=0;i<5;i++) ctx.fillRect(8 + i*10 - (i%2?2:0), ob.h-20 - i*8, 8,6);
+    // eyes on obstacle (funny)
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.ellipse(ob.w/2 - 8, ob.h/2, 8,10,0,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(ob.w/2 + 8, ob.h/2, 8,10,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#000'; ctx.beginPath(); ctx.ellipse(ob.w/2 - 8, ob.h/2, 3,4,0,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.ellipse(ob.w/2 + 8, ob.h/2, 3,4,0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawPlayer(ctx, pl){
+    ctx.save();
+    const px = pl.x, py = pl.y;
+    // shadow
+    ctx.beginPath(); ctx.ellipse(px, H-120 + 12, pl.r - 6, (pl.r-8)/3, 0,0,Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.12)'; ctx.fill();
+    // body: colorful gradient ball
+    const g = ctx.createRadialGradient(px-12,py-12,6,px,py,pl.r+6);
+    g.addColorStop(0,'#fff'); g.addColorStop(0.35,'#ffd47a'); g.addColorStop(1,'#ff8b8b');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(px,py,pl.r,0,Math.PI*2); ctx.fill();
+
+    // face
+    // cheeks
+    ctx.fillStyle='#ffb0b0'; ctx.beginPath(); ctx.ellipse(px-18,py+8,10,6,0,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.ellipse(px+18,py+8,10,6,0,0,Math.PI*2); ctx.fill();
+    // eyes
+    ctx.fillStyle='#fff'; ctx.beginPath(); ctx.ellipse(px-12,py-6,12,14,0,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.ellipse(px+12,py-6,12,14,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#000'; ctx.beginPath(); ctx.ellipse(px-12 + (Math.sin(frame/6)*1.5),py-6,4,6,0,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.ellipse(px+12 + (Math.cos(frame/5)*1.2),py-6,4,6,0,0,Math.PI*2); ctx.fill();
+    // mouth
+    ctx.strokeStyle='#6b2'; ctx.lineWidth=4; ctx.beginPath(); ctx.arc(px,py+8,12,0,Math.PI); ctx.stroke();
+
+    // small arms (cartoon)
+    ctx.strokeStyle='#fff4'; ctx.lineWidth=6; ctx.beginPath(); ctx.moveTo(px-30,py+4); ctx.quadraticCurveTo(px-42,py-8,px-54,py+4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px+30,py+4); ctx.quadraticCurveTo(px+42,py-8,px+54,py+4); ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawParticle(ctx, p){ ctx.save(); ctx.globalAlpha = Math.max(0, p.life/40); ctx.beginPath(); ctx.arc(p.x,p.y,p.s,0,Math.PI*2); ctx.fillStyle=p.c; ctx.fill(); ctx.restore(); }
+
+  // create burst
+  function burst(x,y, n=14){ for(let i=0;i<n;i++){ particles.push({x,y,vx:rand(-6,6),vy:rand(-10,-2),s:rand(3,8),c: `hsl(${Math.floor(rand(0,360))} 80% 60%)`,life:Math.floor(rand(20,60))}) } }
+
+  // On collision create fun effect
+  const originalEnd = endGame;
+  endGame = function(){ burst(player.x, player.y, 30); originalEnd(); }
+
+  // Pause/Resume
+  pauseBtn.onclick = ()=>{ paused = !paused; pauseBtn.textContent = paused ? '▶️' : '⏸️'; }
+
+  // initial reset
+  resetGame();
+
+  // expose some debug
+  window.__game = {startGame, endGame, resetGame};
+})();
+</script>
+</body>
+</html>
